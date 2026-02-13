@@ -6,12 +6,34 @@ import feedparser
 FEISHU_WEBHOOK = (os.environ.get("FEISHU_WEBHOOK") or "").strip()
 DEEPSEEK_API_KEY = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
 
-def post_to_feishu(text: str):
-    if not FEISHU_WEBHOOK:
-        raise RuntimeError("Missing FEISHU_WEBHOOK secret.")
-    payload = {"msg_type": "text", "content": {"text": text}}
-    r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=20)
-    r.raise_for_status()
+def post_to_feishu_in_chunks(text: str, max_len: int = 3500):
+    # 自动拆分发送，避免单条消息过长导致发送失败
+    if len(text) <= max_len:
+        post_to_feishu(text)
+        return
+
+    lines = text.splitlines()
+    chunk, chunks = [], []
+    cur = 0
+
+    for line in lines:
+        add = len(line) + 1
+        if cur + add > max_len and chunk:
+            chunks.append("\n".join(chunk))
+            chunk, cur = [], 0
+        chunk.append(line)
+        cur += add
+
+    if chunk:
+        chunks.append("\n".join(chunk))
+
+    # 第一条原样发，后续条带“续n”
+    for idx, c in enumerate(chunks, 1):
+        if idx == 1:
+            post_to_feishu(c)
+        else:
+            post_to_feishu(f"（续 {idx}）\n{c}")
+
 
 def read_feed(url: str, limit: int = 10):
     try:
@@ -145,10 +167,8 @@ def main():
     raw_block = "【原始链接清单（兜底）】\n" + "\n".join(raw) if raw else ""
 
     text = f"{title}\n\n{digest}\n\n{raw_block}".strip()
-    if len(text) > 3800:
-        text = text[:3800] + "\n\n（内容过长已截断）"
+    post_to_feishu_in_chunks(text, max_len=3500)
 
-    post_to_feishu(text)
 
 if __name__ == "__main__":
     main()
