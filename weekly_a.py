@@ -7,32 +7,64 @@ import feedparser
 FEISHU_WEBHOOK = (os.environ.get("FEISHU_WEBHOOK_WEEKLY_A") or "").strip()
 DEEPSEEK_API_KEY = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
 
+# 发飞书：每段之间 sleep；失败自动重试（退避）
+FEISHU_MAX_LEN = 2500          # 保守一点，减少被截断/拒收风险
+FEISHU_SLEEP_SEC = 0.8         # 节流，降低频控概率
+FEISHU_RETRY = 5               # 重试次数
+
+
+def _post_to_feishu_once(text: str):
+    payload = {"msg_type": "text", "content": {"text": text}}
+    r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=25)
+    return r
+
 
 def post_to_feishu(text: str):
     if not FEISHU_WEBHOOK:
         raise RuntimeError("Missing FEISHU_WEBHOOK_WEEKLY_A secret.")
-    payload = {"msg_type": "text", "content": {"text": text}}
-    r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=20)
-    r.raise_for_status()
+    last_err = None
+    for i in range(FEISHU_RETRY):
+        r = _post_to_feishu_once(text)
+        if 200 <= r.status_code < 300:
+            return
+        last_err = f"Feishu status={r.status_code}, body={r.text[:300]}"
+        # 429/5xx 最常见，退避
+        time.sleep((2 ** i) * 1.2)
+    raise RuntimeError(last_err or "Feishu post failed.")
 
 
-def post_to_feishu_in_chunks(text: str, max_len: int = 3500):
-    if len(text) <= max_len:
-        post_to_feishu(text)
-        return
+def split_into_chunks(text: str, max_len: int):
+    # 按行分段，尽量不破坏结构
     lines = text.splitlines()
-    chunk, chunks, cur = [], [], 0
+    chunks, buf, cur = [], [], 0
     for line in lines:
         add = len(line) + 1
-        if cur + add > max_len and chunk:
-            chunks.append("\n".join(chunk))
-            chunk, cur = [], 0
-        chunk.append(line)
+        if cur + add > max_len and buf:
+            chunks.append("\n".join(buf))
+            buf, cur = [], 0
+        buf.append(line)
         cur += add
-    if chunk:
-        chunks.append("\n".join(chunk))
+    if buf:
+        chunks.append("\n".join(buf))
+
+    # 极端情况下单行超长：再硬切
+    fixed = []
+    for c in chunks:
+        if len(c) <= max_len:
+            fixed.append(c)
+        else:
+            for j in range(0, len(c), max_len):
+                fixed.append(c[j:j + max_len])
+    return fixed
+
+
+def post_to_feishu_in_chunks(text: str, max_len: int = FEISHU_MAX_LEN):
+    chunks = split_into_chunks(text, max_len)
+    total = len(chunks)
     for idx, c in enumerate(chunks, 1):
-        post_to_feishu(c if idx == 1 else f"（续 {idx}）\n{c}")
+        header = "" if total == 1 else f"（第 {idx}/{total} 段）\n"
+        post_to_feishu(header + c)
+        time.sleep(FEISHU_SLEEP_SEC)
 
 
 def read_feed(url: str, limit: int = 12):
@@ -63,11 +95,12 @@ def dedup(items):
 
 
 def filter_recent(items, max_age_seconds: int, now_ts: int):
+    # 严格：无发布时间=丢弃
     out = []
     for it in items:
         ts = it.get("published_ts")
         if ts is None:
-            continue  # 严格：没发布时间=丢弃
+            continue
         age = now_ts - ts
         if 0 <= age <= max_age_seconds:
             out.append(it)
@@ -88,49 +121,24 @@ def call_deepseek(material_text: str, today_str: str) -> str:
     if not DEEPSEEK_API_KEY:
         return "（未配置DEEPSEEK_API_KEY，已降级为原始素材）\n\n" + material_text
 
+    # 关键：约束输出长度 + 强制“写不下就压缩/续写”
     prompt = f"""
 今天是：{today_str}（北京时间）。
-你是“AI专家 + 产业预言家 + 政策解读官”，为一人公司（主营：企业AI赋能/Agent工作流/AI应用落地）输出《周报A：经济&AI政策》。
+你是“AI专家 + 产业预言家 + 政策解读官”，输出《周报A：经济&AI政策》。
+要求：高密度、可执行、但不编造。
 
-【铁律（必须遵守）】
-- 只允许基于素材推理，不得编造不存在的政策、机构、数据、日期、项目
-- 每一条要点末尾必须带【链接】（从素材原文链接复制）
-- 禁止空话：每条都要落到“对我有什么用/下一步怎么做”
-- 预测必须写成：领先指标 → 推论 → 概率（高/中/低）→ 时间窗口（1-4周/1-3月/3-12月）
-- 不要输出“原始链接清单/兜底链接清单”单独栏目（不需要）
+【硬约束】
+- 只允许基于素材推理，不得编造不存在的政策/数据/日期
+- 每条要点末尾必须带【链接】（从素材复制）
+- 不输出“原始链接清单/兜底链接清单”
+- 如果内容太长写不下：优先压缩表达，不要省略结构；必须覆盖到【4) 7天行动清单】
 
-【输出结构（严格按此）】
+【结构（必须完整输出到第4部分）】
 【0) 一句话总览】
-- 1句总结本周政策环境的总风向
-
-【1) 关键变化 Top 6（按重要性排序）】
-- 变化点：xxx（≤16字）
-  影响链：A → B → C（≤20字）
-  对我意味着：1句话（可执行）
-  领先指标：1个（我能监控）
-  概率&窗口：高/中/低 + 时间窗口
-  【链接】xxx
-
-【2) AI政策解读 Top 6（合规/备案/数据/算力/产业扶持）】
-- 政策信号：xxx（≤16字）
-  风险：1句（合规红线）
-  机会：1句（市场/申报/合作/产品）
-  我该怎么用：1句（立刻可做）
-  【链接】xxx
-
-【3) 预测：未来 90 天的 3 个剧本（情景推演）】
-每个剧本包含：
-- 剧本名（≤10字）+ 概率（高/中/低）
-- 驱动因素（3条）
-- 谁受益/谁受损（各2条）
-- 我的一人公司应对策略（3条行动）
-
-【4) 7天行动清单（可验收）】
-每条必须含：
-- 动作
-- 产出物（文档/脚本/报价/演示/对接清单）
-- 截止（具体日期）
-- 验收标准（可检查：数量/完成定义）
+【1) 关键变化 Top 6】
+【2) AI政策解读 Top 6】
+【3) 未来90天 3个剧本（含概率/窗口/领先指标）】
+【4) 7天行动清单（5条，可验收：动作/产出/截止/验收标准）】
 
 【素材】
 {material_text}
@@ -138,9 +146,15 @@ def call_deepseek(material_text: str, today_str: str) -> str:
 
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2}
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        # 关键：给足输出预算（避免半截）
+        "max_tokens": 2500,
+    }
 
-    r = requests.post(url, headers=headers, json=payload, timeout=80)
+    r = requests.post(url, headers=headers, json=payload, timeout=100)
     print("DeepSeek status:", r.status_code)
     if r.status_code != 200:
         return "（DeepSeek调用失败，已降级为原始素材）\n\n" + material_text
@@ -182,7 +196,7 @@ def main():
 
     digest = call_deepseek(material, today_str)
     text = f"{title}\n\n{digest}".strip()
-    post_to_feishu_in_chunks(text, max_len=3500)
+    post_to_feishu_in_chunks(text, max_len=FEISHU_MAX_LEN)
 
 
 if __name__ == "__main__":
