@@ -6,7 +6,7 @@ import feedparser
 FEISHU_WEBHOOK = (os.environ.get("FEISHU_WEBHOOK") or "").strip()
 DEEPSEEK_API_KEY = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
 
-# ===== 1) 飞书推送 =====
+# ---------- Feishu ----------
 def post_to_feishu(text: str):
     if not FEISHU_WEBHOOK:
         raise RuntimeError("Missing FEISHU_WEBHOOK secret.")
@@ -14,7 +14,7 @@ def post_to_feishu(text: str):
     r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=20)
     r.raise_for_status()
 
-# ===== 2) RSS 读取 =====
+# ---------- RSS ----------
 def read_feed(url: str, limit: int = 8):
     try:
         d = feedparser.parse(url)
@@ -29,85 +29,116 @@ def read_feed(url: str, limit: int = 8):
         print("RSS error:", url, str(e))
         return []
 
-def build_material(ai_items, gh_items):
-    lines = []
-    lines.append("【AI 创业圈】")
-    if ai_items:
-        for i, it in enumerate(ai_items, 1):
-            lines.append(f"{i}. {it['title']} | {it['link']}")
-    else:
-        lines.append("（本次抓取为空/失败）")
+def dedup_items(items):
+    seen = set()
+    out = []
+    for it in items:
+        if it["link"] in seen:
+            continue
+        seen.add(it["link"])
+        out.append(it)
+    return out
 
-    lines.append("\n【GitHub Trending】")
-    if gh_items:
-        for i, it in enumerate(gh_items, 1):
-            lines.append(f"{i}. {it['title']} | {it['link']}")
-    else:
-        lines.append("（本次抓取为空/失败）")
+def collect_ai_news():
+    # 多源容灾：RSSHub 偶尔不稳，尽量多抓
+    ai_feeds = [
+        "https://rsshub.app/qbitai/category/资讯",
+        "https://rsshub.app/36kr/newsflashes",
+        "https://rsshub.app/36kr/news/latest",
+        "https://rsshub.app/huxiu/article",
+        "https://rsshub.app/juejin/category/ai",
+        # 你也可以后续加：少数派/机器之心等（RSSHub 有路由就行）
+    ]
 
+    all_items = []
+    for u in ai_feeds:
+        all_items.extend(read_feed(u, limit=6))
+
+    all_items = dedup_items(all_items)
+    return all_items[:12]  # 最多取 12 条给模型
+
+def collect_github_trending():
+    gh_trending = "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml"
+    return read_feed(gh_trending, limit=12)
+
+def format_items_block(title, items):
+    lines = [f""]
+    if not items:
+        lines.append("（本次抓取为空/失败）")
+        return "\n".join(lines)
+
+    for i, it in enumerate(items, 1):
+        lines.append(f"{i}. {it['title']}\n{it['link']}")
     return "\n".join(lines)
 
-# ===== 3) DeepSeek 总结（失败自动降级，不让 workflow 红）=====
-def call_deepseek_or_fallback(material_text: str) -> str:
-    # 打印长度帮助你排查是否传入（不泄露 key）
-    print("DEEPSEEK_API_KEY len:", len(DEEPSEEK_API_KEY))
-    print("DEEPSEEK_API_KEY prefix:", DEEPSEEK_API_KEY[:6])
-
+# ---------- DeepSeek ----------
+def call_deepseek(material_text: str, today_str: str) -> str:
     if not DEEPSEEK_API_KEY:
         return "（未配置DEEPSEEK_API_KEY，已降级为原始情报）\n\n" + material_text[:1800]
 
     prompt = f"""
-你是我的创业情报秘书。基于素材输出中文日报，要求：
-1) 趋势判断（3-5条，强判断短句）
-2) 未来方向（3条：未来1-3个月值得跟进）
-3) 今日要点（5-10条，每条<=30字，带#标签：#融资 #产品 #开源 #监管 #增长 等）
-4) 24小时动作（3条，可执行）
-口吻：秘书式、冷静、言简意赅、信息密度高
-素材：
+今天是：{today_str}（北京时间）。
+你是我的创业情报秘书，请基于素材输出“可执行、可追踪”的日报。必须遵守格式：
+
+【日期】必须输出：{today_str}
+【Top 5（最重要）】5条：每条=一句话概括 + 链接（必须有链接）
+【AI 创业圈（要点）】最多6条：每条=一句话概括 + 链接（必须有链接）
+【GitHub Trending（要点）】最多6条：每条=一句话概括 + 链接（必须有链接）
+【对我（一人公司）的机会点】3条：用“如果…那么我可以…”句式，具体到可做的微产品
+【风险/注意】3条：license/可商用/维护活跃度/合规（没有信息就写“需核查”）
+【24小时动作】3条：每条包含 产出物 + 截止时间 + 完成标准
+
+写作要求：中文；秘书口吻；短句；高密度；不要空泛。
+素材如下：
 {material_text}
 """.strip()
 
-    # DeepSeek 通常兼容 OpenAI Chat Completions 风格
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
+        "temperature": 0.2,
     }
 
-    try:
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    if r.status_code != 200:
         print("DeepSeek status:", r.status_code)
-        if r.status_code != 200:
-            print("DeepSeek body:", r.text[:800])
-            return "（DeepSeek调用失败，已降级为原始情报）\n\n" + material_text[:1800]
+        print("DeepSeek body:", r.text[:800])
+        return "（DeepSeek调用失败，已降级为原始情报）\n\n" + material_text[:1800]
 
-        data = r.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print("DeepSeek exception:", str(e))
-        return "（DeepSeek异常，已降级为原始情报）\n\n" + material_text[:1800]
+    data = r.json()
+    return data["choices"][0]["message"]["content"].strip()
 
 def main():
-    # 你可以后续换源；先保证跑通
-    ai_feed = "https://rsshub.app/qbitai/category/资讯"
-    gh_trending = "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml"
-
-    ai_items = read_feed(ai_feed, limit=8)
-    gh_items = read_feed(gh_trending, limit=8)
-
-    material = build_material(ai_items, gh_items)
-    digest = call_deepseek_or_fallback(material)
-
+    # 北京时间
     beijing_now = dt.datetime.utcnow() + dt.timedelta(hours=8)
+    today_str = beijing_now.strftime("%Y-%m-%d")
     title = f"AI创业日报（北京 {beijing_now.strftime('%Y-%m-%d %H:%M')}）"
 
-    # 飞书单条文本别太长，保守截断
-    max_len = 3500
-    text = f"{title}\n\n{digest}"
-    if len(text) > max_len:
-        text = text[:max_len] + "\n\n（内容过长已截断）"
+    ai_items = collect_ai_news()
+    gh_items = collect_github_trending()
+
+    material = "\n\n".join([
+        format_items_block("AI 创业圈（原始素材）", ai_items),
+        format_items_block("GitHub Trending（原始素材）", gh_items),
+    ])
+
+    digest = call_deepseek(material, today_str)
+
+    # 兜底：即使模型漏链接，也在末尾强制附原始清单
+    raw_links = []
+    for it in ai_items[:8]:
+        raw_links.append(f"- {it['title']} | {it['link']}")
+    for it in gh_items[:8]:
+        raw_links.append(f"- {it['title']} | {it['link']}")
+    raw_block = "【原始链接清单（兜底）】\n" + "\n".join(raw_links) if raw_links else ""
+
+    text = f"{title}\n\n{digest}\n\n{raw_block}".strip()
+
+    # 飞书单条文本长度控制
+    if len(text) > 3800:
+        text = text[:3800] + "\n\n（内容过长已截断）"
 
     post_to_feishu(text)
 
