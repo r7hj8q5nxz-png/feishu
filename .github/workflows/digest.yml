@@ -2,9 +2,7 @@ name: Feishu Daily Digest
 
 on:
   schedule:
-    # GitHub Actions cron 是 UTC 时间
-    # 北京时间 08:30 = UTC 00:30
-    - cron: "30 0 * * *"
+    - cron: "30 0 * * *"   # 北京时间 08:30 = UTC 00:30
   workflow_dispatch:
 
 jobs:
