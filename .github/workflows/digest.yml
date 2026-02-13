@@ -19,8 +19,8 @@ jobs:
       - name: Install deps
         run: pip install requests feedparser
 
-      - name: Run digest
-        env:
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: python digest.py
+     - name: Run digest
+  env:
+    FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+    LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+  run: python digest.py
