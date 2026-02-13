@@ -1,28 +1,33 @@
-name: Weekly Policy & Chengdu AI Brief
+name: Weekly Brief (Split A/B)
 
 on:
-  schedule:
-    # 每周一 北京时间 08:30 = UTC 00:30
-    - cron: "30 0 * * 1"
   workflow_dispatch:
+  schedule:
+    # GitHub Actions cron 是 UTC；北京时间周一 08:30 = UTC 周一 00:30
+    - cron: "30 0 * * 1"
 
 jobs:
-  run:
+  run_weekly_ab:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install deps
         run: pip install requests feedparser
 
-      - name: Run weekly brief
+      - name: Run weekly A
         env:
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_WEBHOOK_WEEKLY_A: ${{ secrets.FEISHU_WEBHOOK_WEEKLY_A }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python weekly_policy.py
+        run: python weekly_a.py
+
+      - name: Run weekly B
+        env:
+          FEISHU_WEBHOOK_WEEKLY_B: ${{ secrets.FEISHU_WEBHOOK_WEEKLY_B }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: python weekly_b.py
+
