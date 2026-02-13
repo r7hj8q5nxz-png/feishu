@@ -7,12 +7,14 @@ import feedparser
 FEISHU_WEBHOOK = (os.environ.get("FEISHU_WEBHOOK_WEEKLY_B") or "").strip()
 DEEPSEEK_API_KEY = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
 
+
 def post_to_feishu(text: str):
     if not FEISHU_WEBHOOK:
         raise RuntimeError("Missing FEISHU_WEBHOOK_WEEKLY_B secret.")
     payload = {"msg_type": "text", "content": {"text": text}}
     r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=20)
     r.raise_for_status()
+
 
 def post_to_feishu_in_chunks(text: str, max_len: int = 3500):
     if len(text) <= max_len:
@@ -25,11 +27,13 @@ def post_to_feishu_in_chunks(text: str, max_len: int = 3500):
         if cur + add > max_len and chunk:
             chunks.append("\n".join(chunk))
             chunk, cur = [], 0
-        chunk.append(line); cur += add
+        chunk.append(line)
+        cur += add
     if chunk:
         chunks.append("\n".join(chunk))
     for idx, c in enumerate(chunks, 1):
         post_to_feishu(c if idx == 1 else f"（续 {idx}）\n{c}")
+
 
 def read_feed(url: str, limit: int = 12):
     try:
@@ -47,23 +51,28 @@ def read_feed(url: str, limit: int = 12):
         print("RSS error:", url, str(ex))
         return []
 
+
 def dedup(items):
     seen, out = set(), []
     for it in items:
         if it["link"] in seen:
             continue
-        seen.add(it["link"]); out.append(it)
+        seen.add(it["link"])
+        out.append(it)
     return out
+
 
 def filter_recent(items, max_age_seconds: int, now_ts: int):
     out = []
     for it in items:
         ts = it.get("published_ts")
         if ts is None:
-            continue
-        if 0 <= (now_ts - ts) <= max_age_seconds:
+            continue  # 严格：没发布时间=丢弃
+        age = now_ts - ts
+        if 0 <= age <= max_age_seconds:
             out.append(it)
     return out
+
 
 def block(title: str, items):
     lines = [f""]
@@ -74,31 +83,54 @@ def block(title: str, items):
         lines.append(f"{i}. {it['title']}\n{it['link']}")
     return "\n".join(lines)
 
+
 def call_deepseek(material_text: str, today_str: str) -> str:
     if not DEEPSEEK_API_KEY:
-        return "（未配置DEEPSEEK_API_KEY，已降级为原始情报）\n\n" + material_text
+        return "（未配置DEEPSEEK_API_KEY，已降级为原始素材）\n\n" + material_text
 
     prompt = f"""
 今天是：{today_str}（北京时间）。
-你是我的“周报B（成都AI）”秘书。只基于素材总结，不得编造。每条必须带链接。
+你是“成都AI产业观察员 + 机会捕手 + 预言家（但不编造）”，为一人公司（企业AI赋能/Agent工作流）输出《周报B：成都AI政策&动态》。
 
-输出结构（严格）：
-【日期】{today_str}
-【周期】近7天
+【铁律】
+- 只允许基于素材推理，不得编造不存在的政策/项目/日期
+- 每条要点末尾必须带【链接】（从素材复制）
+- 禁止输出“原始链接清单/兜底链接清单”单独栏目（不需要）
+- 重点写“成都本地机会”：申报/合作/客户/渠道/活动/园区/算力
 
-【1) 成都AI政策 Top 6】
-- 一句话概括 + 机会点（申报/合作/市场）+ 链接
+【输出结构（严格）】
+【0) 成都AI一句话风向】
+- 1句话总结本周成都AI“政策/产业/项目/活动”的主变化
 
-【2) 成都AI新闻动态 Top 10】
-- 一句话概括 + 机会点（客户/渠道/合作）+ 链接
+【1) 成都AI政策机会 Top 6】
+- 信号：xxx（≤16字）
+  机会点：申报/合作/市场（1句）
+  适配产品：我能卖什么（1句）
+  下一步：我明天能做的1件事（可执行）
+  【链接】xxx
 
-【3) 本周结论】
-- 3条：强判断短句
+【2) 成都AI项目/动态 Top 10】
+- 事件：xxx（≤18字）
+  谁在做：机构/企业/园区（如素材可见）
+  可能缺口：他们缺什么（1句）
+  我怎么切入：1句（切入动作）
+  【链接】xxx
 
-【4) 下周动作】
-- 3条：产出物 + 截止时间 + 完成标准
+【3) 预测：未来60天 3条确定性趋势】
+每条包含：
+- 趋势短句
+- 领先指标（可监控）
+- 触发阈值（出现什么算确认）
+- 概率（高/中/低）+ 时间窗口
 
-素材：
+【4) 本周5个可成交行动（可验收）】
+每条必须含：
+- 客户类型（园区/制造/政务/教育/零售等）
+- 交付物（POC/方案/报价/演示/对接清单）
+- 截止日期
+- 验收标准（可检查）
+
+【素材】
 {material_text}
 """.strip()
 
@@ -106,11 +138,12 @@ def call_deepseek(material_text: str, today_str: str) -> str:
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2}
 
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r = requests.post(url, headers=headers, json=payload, timeout=80)
     print("DeepSeek status:", r.status_code)
     if r.status_code != 200:
-        return "（DeepSeek调用失败，已降级为原始情报）\n\n" + material_text
+        return "（DeepSeek调用失败，已降级为原始素材）\n\n" + material_text
     return r.json()["choices"][0]["message"]["content"].strip()
+
 
 def main():
     now_ts = int(time.time())
@@ -145,20 +178,10 @@ def main():
         block("成都AI新闻动态素材（近7天）", news_items),
     ])
 
-    try:
-        digest = call_deepseek(material, today_str)
-    except Exception:
-        digest = "（DeepSeek异常，已降级为原始情报）\n\n" + material
-
-    raw = []
-    for it in policy_items[:8]:
-        raw.append(f"- {it['title']} | {it['link']}")
-    for it in news_items[:10]:
-        raw.append(f"- {it['title']} | {it['link']}")
-    raw_block = "【原始链接清单（兜底）】\n" + ("\n".join(raw) if raw else "（无）")
-
-    text = f"{title}\n\n{digest}\n\n{raw_block}".strip()
+    digest = call_deepseek(material, today_str)
+    text = f"{title}\n\n{digest}".strip()
     post_to_feishu_in_chunks(text, max_len=3500)
+
 
 if __name__ == "__main__":
     main()
