@@ -1,4 +1,4 @@
-import os
+timport os
 import time
 import datetime as dt
 import requests
@@ -25,7 +25,8 @@ def post_to_feishu_in_chunks(text: str, max_len: int = 3500):
         if cur + add > max_len and chunk:
             chunks.append("\n".join(chunk))
             chunk, cur = [], 0
-        chunk.append(line); cur += add
+        chunk.append(line)
+        cur += add
     if chunk:
         chunks.append("\n".join(chunk))
     for idx, c in enumerate(chunks, 1):
@@ -52,7 +53,8 @@ def dedup(items):
     for it in items:
         if it["link"] in seen:
             continue
-        seen.add(it["link"]); out.append(it)
+        seen.add(it["link"])
+        out.append(it)
     return out
 
 def filter_recent(items, max_age_seconds: int, now_ts: int):
@@ -76,40 +78,71 @@ def block(title: str, items):
 
 def call_deepseek(material_text: str, today_str: str) -> str:
     if not DEEPSEEK_API_KEY:
-        return "（未配置DEEPSEEK_API_KEY，已降级为原始情报）\n\n" + material_text
+        # 不给兜底链接清单，但允许降级为“原始素材”
+        return "（未配置DEEPSEEK_API_KEY，已降级为原始素材）\n\n" + material_text
 
     prompt = f"""
 今天是：{today_str}（北京时间）。
-你是我的“周报A（经济+AI政策）”秘书。只基于素材总结，不得编造。每条必须带链接。
+你是“AI专家 + 产业预言家 + 政策解读官”，为一人公司（主营：企业AI赋能/Agent工作流/AI应用落地）输出《周报A：经济&AI政策》。
 
-输出结构（严格）：
-【日期】{today_str}
-【周期】近7天
+【铁律（必须遵守）】
+- 只允许基于素材推理，不得编造不存在的政策、机构、数据、日期、项目
+- 每一条要点末尾必须带【链接】（从素材原文链接复制）
+- 禁止空话：每条都要落到“对我有什么用/下一步怎么做”
+- 预测必须写成：领先指标 → 推论 → 概率（高/中/低）→ 时间窗口（1-4周/1-3月/3-12月）
+- 不要输出“原始链接清单/兜底链接清单”单独栏目（不需要）
 
-【1) 经济政策 Top 6】
-- 一句话概括 + 影响对象 + 我该怎么用（1句）+ 链接
+【输出结构（严格按此）】
+【0) 一句话总览】
+- 用一句话总结本周政策环境的“总风向”
 
-【2) AI政策 Top 6】
-- 一句话概括 + 重点（合规/备案/数据/算力/扶持）+ 我该怎么用（1句）+ 链接
+【1) 关键变化 Top 6（按重要性排序）】
+格式固定为：
+- 变化点：xxx（≤16字）
+  影响链：A → B → C（≤20字）
+  对我意味着：1句话（可执行）
+  领先指标：1个（我能监控）
+  概率&窗口：高/中/低 + 时间窗口
+  【链接】xxx
 
-【3) 本周结论】
-- 3条：强判断短句
+【2) AI政策解读 Top 6（偏合规/备案/数据/算力/产业扶持）】
+格式固定为：
+- 政策信号：xxx（≤16字）
+  风险：1句（合规/红线）
+  机会：1句（市场/申报/合作/产品）
+  我该怎么用：1句（立刻可做）
+  【链接】xxx
 
-【4) 下周动作】
-- 3条：产出物 + 截止时间 + 完成标准
+【3) 预测：未来 90 天的 3 个剧本（情景推演）】
+每个剧本包含：
+- 剧本名（≤10字）+ 概率（高/中/低）
+- 驱动因素（3条）
+- 谁受益/谁受损（各2条）
+- 我的一人公司应对策略（3条行动）
 
-素材：
+【4) 本周要做的 7 天行动清单（可验收）】
+每条必须含：
+- 动作：xxx
+- 产出物：可交付物（文档/脚本/报价单/POC）
+- 截止：具体日期
+- 验收标准：可检查（数量/完成定义）
+
+【素材】
 {material_text}
 """.strip()
 
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}], "temperature": 0.2}
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
 
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r = requests.post(url, headers=headers, json=payload, timeout=80)
     print("DeepSeek status:", r.status_code)
     if r.status_code != 200:
-        return "（DeepSeek调用失败，已降级为原始情报）\n\n" + material_text
+        return "（DeepSeek调用失败，已降级为原始素材）\n\n" + material_text
     return r.json()["choices"][0]["message"]["content"].strip()
 
 def main():
@@ -145,19 +178,8 @@ def main():
         block("AI政策素材（全国｜近7天）", ai_items),
     ])
 
-    try:
-        digest = call_deepseek(material, today_str)
-    except Exception:
-        digest = "（DeepSeek异常，已降级为原始情报）\n\n" + material
-
-    raw = []
-    for it in econ_items[:8]:
-        raw.append(f"- {it['title']} | {it['link']}")
-    for it in ai_items[:8]:
-        raw.append(f"- {it['title']} | {it['link']}")
-    raw_block = "【原始链接清单（兜底）】\n" + ("\n".join(raw) if raw else "（无）")
-
-    text = f"{title}\n\n{digest}\n\n{raw_block}".strip()
+    digest = call_deepseek(material, today_str)
+    text = f"{title}\n\n{digest}".strip()
     post_to_feishu_in_chunks(text, max_len=3500)
 
 if __name__ == "__main__":
