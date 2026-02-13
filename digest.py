@@ -37,19 +37,18 @@ def build_material(ai_items, gh_items):
 
 # ===== 3) 大模型总结（默认 OpenAI 兼容接口）=====
 def call_llm(material_text: str) -> str:
-    # 没有 Key：直接返回“无大模型版本”，保证流程可跑通
+    # 只打印长度/前缀，不泄露真实key
+    print("LLM_API_KEY len:", len(LLM_API_KEY))
+    print("LLM_API_KEY prefix:", LLM_API_KEY[:7])
+
+    # 没有key：直接降级
     if not LLM_API_KEY:
-        return (
-            "（未配置LLM_API_KEY，以下为原始摘要）\n\n"
-            + material_text[:1800]
-        )
+        return "（未配置LLM_API_KEY，已降级为原始情报）\n\n" + material_text[:1800]
 
     prompt = f"""
 你是我的创业情报秘书。基于素材输出中文日报，要求：
-- 口吻：秘书式、冷静、言简意赅、信息密度高
-- 结构固定（必须按此顺序输出）：
-1) 趋势判断（3-5条，短句，强判断）
-2) 未来方向（3条：未来1-3个月值得跟进的方向）
+1) 趋势判断（3-5条，强判断短句）
+2) 未来方向（3条：未来1-3个月值得跟进）
 3) 今日要点（5-10条，每条<=30字，带#标签：#融资 #产品 #开源 #监管 #增长 等）
 4) 24小时动作（3条，可执行）
 素材：
@@ -59,14 +58,27 @@ def call_llm(material_text: str) -> str:
     url = "https://api.openai.com/v1/chat/completions"
     headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "gpt-4.1-mini",
+        "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
-    r.raise_for_status()
-    data = r.json()
-    return data["choices"][0]["message"]["content"].strip()
+
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        print("OpenAI status:", r.status_code)
+
+        if r.status_code != 200:
+            # 打印错误体，方便定位
+            print("OpenAI body:", r.text[:800])
+            return "（LLM调用失败/401，已降级为原始情报）\n\n" + material_text[:1800]
+
+        data = r.json()
+        return data["choices"][0]["message"]["content"].strip()
+
+    except Exception as e:
+        print("LLM exception:", str(e))
+        return "（LLM异常，已降级为原始情报）\n\n" + material_text[:1800]
+
 
 def main():
     # ===== 你只用群机器人，所以只做“群消息推送” =====
