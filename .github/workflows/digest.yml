@@ -1,0 +1,28 @@
+name: Feishu Daily Digest
+
+on:
+  schedule:
+    # GitHub Actions cron 是 UTC 时间
+    # 北京时间 08:30 = UTC 00:30
+    - cron: "30 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests feedparser
+
+      - name: Run digest
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: python digest.py
