@@ -45,10 +45,11 @@ def post_to_feishu_in_chunks(text: str, max_len: int = 3500):
 # =========================
 # RSS
 # =========================
-def read_feed(url: str, limit: int = 12):
+def read_feed(url: str, limit: int = 12, assume_now_if_missing_ts: bool = False, now_ts: int = None):
     """
-    读取 RSS 并解析发布时间。
-    返回：title, link, published_ts（可能为 None）
+    读取 RSS 并解析发布时间（published/updated）。
+    - 正常：没有发布时间 -> published_ts=None
+    - 白名单：assume_now_if_missing_ts=True 时，没有发布时间 -> 用 now_ts 作为发布时间（用于 GitHub Trending 这种“当天榜单”）
     """
     try:
         d = feedparser.parse(url)
@@ -56,8 +57,13 @@ def read_feed(url: str, limit: int = 12):
         for e in d.entries[:limit]:
             title = (e.get("title") or "").strip()
             link = (e.get("link") or "").strip()
+
             t = e.get("published_parsed") or e.get("updated_parsed")
             published_ts = int(time.mktime(t)) if t else None
+
+            if published_ts is None and assume_now_if_missing_ts and now_ts is not None:
+                published_ts = now_ts
+
             if title and link:
                 items.append({"title": title, "link": link, "published_ts": published_ts})
         return items
@@ -75,24 +81,30 @@ def dedup_items(items):
         out.append(it)
     return out
 
-def filter_recent(items, max_age_seconds: int, now_ts: int):
+def filter_recent(items, max_age_seconds: int, now_ts: int, drop_if_no_ts: bool = True):
     """
-    严格过滤：只保留 max_age_seconds 内发布的条目。
-    没有发布时间的一律丢弃（严格满足你的要求）。
+    严格时间过滤：
+    - drop_if_no_ts=True：无发布时间 -> 丢弃（你的硬要求）
+    - 但对 GitHub Trending 我们在 read_feed 里已经把缺失时间“视为 now_ts”，因此仍能通过过滤
     """
     out = []
     for it in items:
         ts = it.get("published_ts")
         if ts is None:
-            continue
-        if 0 <= (now_ts - ts) <= max_age_seconds:
+            if drop_if_no_ts:
+                continue
+            else:
+                out.append(it)
+                continue
+        age = now_ts - ts
+        if 0 <= age <= max_age_seconds:
             out.append(it)
     return out
 
 def format_items_block(title, items):
     lines = [f""]
     if not items:
-        lines.append("（过去24小时内无符合条件的条目/或源未提供发布时间）")
+        lines.append("（过去24小时内无符合条件的条目）")
         return "\n".join(lines)
     for i, it in enumerate(items, 1):
         lines.append(f"{i}. {it['title']}\n{it['link']}")
@@ -158,44 +170,52 @@ def main():
     today_str = beijing_now.strftime("%Y-%m-%d")
     title = f"AI创业日报（北京 {beijing_now.strftime('%Y-%m-%d %H:%M')}）"
 
-    # AI 创业圈：多源（仍可能不稳定，但我们用“严格时间过滤”保证不混旧闻）
+    # -------------------------
+    # AI 创业圈：换成 Google News RSS + when:1d（发布时间稳定）
+    # -------------------------
     ai_feeds = [
-        "https://rsshub.app/36kr/newsflashes",
-        "https://rsshub.app/36kr/news/latest",
-        "https://rsshub.app/huxiu/article",
-        "https://rsshub.app/juejin/category/ai",
-        "https://rsshub.app/qbitai/category/资讯",
-    ]
-
-    # GitHub Trending RSS（注意：部分RSS可能不带发布时间 -> 会被严格过滤掉，这是你要求的结果）
-    gh_feeds = [
-        "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml",
+        # AI创业总体
+        "https://news.google.com/rss/search?q=AI%20%E5%88%9B%E4%B8%9A%20when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        # 企业AI赋能 / ToB
+        "https://news.google.com/rss/search?q=%E4%BC%81%E4%B8%9AAI%20%E8%B5%8B%E8%83%BD%20when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        # Agent / 工作流
+        "https://news.google.com/rss/search?q=AI%20Agent%20%E5%B7%A5%E4%BD%9C%E6%B5%81%20when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        # 融资/并购（信号强）
+        "https://news.google.com/rss/search?q=AI%20%E8%9E%8D%E8%B5%84%20when:1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
     ]
 
     ai_items = []
     for u in ai_feeds:
-        ai_items.extend(read_feed(u, limit=10))
+        ai_items.extend(read_feed(u, limit=12))
     ai_items = dedup_items(ai_items)
-    ai_items = filter_recent(ai_items, DAY_SECONDS, now_ts)[:12]
+    ai_items = filter_recent(ai_items, DAY_SECONDS, now_ts, drop_if_no_ts=True)[:15]
+
+    # -------------------------
+    # GitHub Trending：白名单例外（很多RSS没发布时间）
+    # 解释：Trending 本质是“当天榜单”，没有 pubDate 也应视为今日有效
+    # -------------------------
+    gh_feeds = [
+        "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml",
+    ]
 
     gh_items = []
     for u in gh_feeds:
-        gh_items.extend(read_feed(u, limit=15))
+        gh_items.extend(read_feed(u, limit=20, assume_now_if_missing_ts=True, now_ts=now_ts))
     gh_items = dedup_items(gh_items)
-    gh_items = filter_recent(gh_items, DAY_SECONDS, now_ts)[:12]
+    gh_items = filter_recent(gh_items, DAY_SECONDS, now_ts, drop_if_no_ts=True)[:15]
 
     material = "\n\n".join([
         format_items_block("AI 创业圈（过去24小时素材）", ai_items),
-        format_items_block("GitHub Trending（过去24小时素材）", gh_items),
+        format_items_block("GitHub Trending（今日榜单视为24小时内）", gh_items),
     ])
 
     digest = call_deepseek(material, today_str)
 
-    # 兜底：把原始链接清单附上（防止模型漏链接）
+    # 兜底：原始链接清单（防止模型漏链接）
     raw_links = []
-    for it in ai_items[:8]:
+    for it in ai_items[:10]:
         raw_links.append(f"- {it['title']} | {it['link']}")
-    for it in gh_items[:8]:
+    for it in gh_items[:10]:
         raw_links.append(f"- {it['title']} | {it['link']}")
     raw_block = "【原始链接清单（兜底）】\n" + "\n".join(raw_links) if raw_links else "【原始链接清单（兜底）】\n（无）"
 
@@ -204,4 +224,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
