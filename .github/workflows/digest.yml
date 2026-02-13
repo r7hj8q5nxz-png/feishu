@@ -23,5 +23,5 @@ jobs:
       - name: Run digest
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: python digest.py
