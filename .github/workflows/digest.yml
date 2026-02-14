@@ -2,7 +2,7 @@ name: Feishu Daily Digest
 
 on:
   schedule:
-    - cron: "18 3 * * *"  # Beijing 08:30 = UTC 00:30
+    - cron: "33 0 * * *"  # Beijing 08:30 = UTC 00:30
   workflow_dispatch:
 
 jobs:
